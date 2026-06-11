@@ -145,7 +145,6 @@ def run_server(session: Session, ctx: Any) -> None:
     shutdown_event = threading.Event()
 
     logger.info(f"ghidra-rpc server listening on {sock_path}")
-    print(f"ghidra-rpc server listening on {sock_path}", file=sys.stderr)
 
     try:
         while not shutdown_event.is_set():
@@ -168,4 +167,3 @@ def run_server(session: Session, ctx: Any) -> None:
         if sock_path.exists():
             sock_path.unlink()
         logger.info("Server shut down.")
-        print("Server shut down.", file=sys.stderr)
