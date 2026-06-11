@@ -47,6 +47,25 @@ def _normalize_byte_pattern(pattern: str) -> str:
 _FIND_BYTES_CONTEXT = 16  # bytes of context on each side of a match
 
 
+def _pattern_to_ghidra_regex(normalized: str) -> str:
+    """Convert a space-separated normalized hex pattern to a Ghidra findBytes regex.
+
+    ``findBytes(Address, String, int)`` interprets its String argument as a
+    regular expression over *raw bytes*, where each character matches its ASCII
+    value — so the string ``"55"`` matches 0x35 0x35, not the byte 0x55.
+    We must emit ``\\xNN`` escapes so Ghidra matches the intended byte values.
+    Wildcard tokens (already normalised to ``'.'``) are kept as regex ``'.'``
+    (matches any single byte).
+    """
+    parts = []
+    for tok in normalized.split():
+        if tok == ".":
+            parts.append(".")
+        else:
+            parts.append("\\x" + tok)
+    return "".join(parts)
+
+
 def _handle_find_bytes(ctx, args: dict) -> dict:
     """Search for a byte pattern (with optional wildcards) in program memory.
 
@@ -89,9 +108,12 @@ def _handle_find_bytes(ctx, args: dict) -> dict:
     else:
         start_addr = pi.program.getMinAddress()
 
-    # Use FlatProgramAPI.findBytes(Address, String, int) which returns Address[]
+    # FlatProgramAPI.findBytes(Address, String, int) treats the String as a
+    # regex over raw bytes — each character matches its ASCII value, so we
+    # must convert our hex tokens to \xNN escapes.
+    ghidra_regex = _pattern_to_ghidra_regex(normalized)
     try:
-        addrs = pi.flat_api.findBytes(start_addr, normalized, limit)
+        addrs = pi.flat_api.findBytes(start_addr, ghidra_regex, limit)
     except Exception as e:
         raise RuntimeError(f"Byte search failed: {e}") from e
 
