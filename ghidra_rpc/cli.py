@@ -64,6 +64,80 @@ def _json_error(error: str, message: str) -> None:
     sys.exit(1)
 
 
+def _discover_instances(include_dead: bool = False) -> list[dict]:
+    """Discover all ghidra-rpc daemon instances via registry + /tmp glob.
+
+    Merges entries from the global session registry with any
+    ``/tmp/ghidra-rpc-*.sock`` files not already in the registry (catches
+    pre-registry installs and manually started daemons).  Each candidate is
+    probed with a short-timeout ping so liveness is always authoritative.
+
+    When *include_dead* is False (default) only live instances are returned.
+    Registry entries whose socket file has disappeared are pruned automatically.
+    """
+    from ghidra_rpc.client import send_request
+
+    def _probe(socket_path: Path) -> dict | None:
+        """Ping socket; return the result dict or None if not responsive."""
+        try:
+            resp = send_request(socket_path, "ping", {}, socket_timeout=5.0)
+            if resp.get("ok"):
+                return resp.get("result", {})
+        except Exception:
+            pass
+        return None
+
+    # Registry entries take precedence (they carry ghidra_install_dir etc.);
+    # the /tmp glob catches anything not registered.
+    candidates: dict[str, dict] = {}  # str(socket_path) -> {socket, session}
+    for sess in session_mod.load_all():
+        key = str(sess.socket_path)
+        candidates[key] = {"socket": sess.socket_path, "session": sess}
+    for sock_path in sorted(Path("/tmp").glob("ghidra-rpc-*.sock")):
+        key = str(sock_path)
+        if key not in candidates:
+            candidates[key] = {"socket": sock_path, "session": None}
+
+    results: list[dict] = []
+    stale: list[Path] = []
+
+    for info in candidates.values():
+        sock = info["socket"]
+        sess = info["session"]
+        ping_meta = _probe(sock)
+        alive = ping_meta is not None
+
+        if not alive:
+            # Socket file gone entirely: stale registry entry, prune it.
+            if not sock.exists() and sess:
+                stale.append(sess.project_gpr)
+            if not include_dead:
+                continue
+
+        entry: dict = {"running": alive, "socket": str(sock)}
+        if alive and ping_meta:
+            # Live daemon is the authoritative source.
+            entry["project"] = ping_meta.get("project_gpr")
+            entry["mode"]    = ping_meta.get("mode")
+            entry["pid"]     = ping_meta.get("pid")
+        elif sess:
+            # Dead instance, but we have registry metadata.
+            entry["project"] = str(sess.project_gpr)
+            entry["mode"]    = sess.mode
+            entry["pid"]     = None
+        else:
+            # Dead instance with no registry entry (glob-only).
+            entry["project"] = None
+            entry["mode"]    = None
+            entry["pid"]     = None
+        results.append(entry)
+
+    for gpr in stale:
+        session_mod.unregister(gpr)
+
+    return results
+
+
 @click.group()
 @click.version_option(__version__, prog_name="ghidra-rpc")
 def cli():
@@ -271,9 +345,32 @@ def status(project: str | None):
 
 @cli.command()
 @click.option("--project", "-p", type=str, help="Path to .gpr project file")
-def stop(project: str | None):
+@click.option("--all", "stop_all", is_flag=True, default=False,
+              help="Stop all running instances (mutually exclusive with --project).")
+def stop(project: str | None, stop_all: bool):
     """Stop the daemon."""
     from ghidra_rpc.daemon import stop_daemon
+
+    if stop_all and project:
+        _json_error("InvalidArgs", "--all and --project are mutually exclusive.")
+
+    if stop_all:
+        instances = _discover_instances(include_dead=False)
+        if not instances:
+            _json_output({"ok": True, "result": {"stopped": [], "count": 0}})
+            return
+        stopped: list[str] = []
+        failed: list[str] = []
+        for inst in instances:
+            label = inst.get("project") or inst["socket"]
+            if stop_daemon(Path(inst["socket"])):
+                stopped.append(label)
+            else:
+                failed.append(label)
+        _json_output({"ok": True, "result": {
+            "stopped": stopped, "failed": failed, "count": len(stopped),
+        }})
+        return
 
     gpr = _resolve_project(project)
     sock = session_mod.socket_path_for_project(gpr)
@@ -282,6 +379,31 @@ def stop(project: str | None):
         _json_output({"ok": True, "result": {"status": "stopped"}})
     else:
         _json_error("NotRunning", "Daemon is not running.")
+
+
+@cli.command(name="list-instances")
+@click.option("--all", "include_dead", is_flag=True, default=False,
+              help="Also show registered instances that are not currently running.")
+def list_instances(include_dead: bool):
+    """List all known ghidra-rpc daemon instances.
+
+    Discovers instances from the global session registry and from any
+    /tmp/ghidra-rpc-*.sock files not already in the registry.  Each entry
+    is probed for liveness; stale registry entries (socket file gone) are
+    pruned automatically.
+
+    Use the reported project path with --project (or GHIDRA_RPC_PROJECT) to
+    attach to an existing session:
+
+    \b
+      export GHIDRA_RPC_PROJECT=/path/to/project.gpr
+      ghidra-rpc list-binaries
+    """
+    instances = _discover_instances(include_dead=include_dead)
+    _json_output({
+        "ok": True,
+        "result": {"instances": instances, "count": len(instances)},
+    })
 
 
 # ─── Generic command passthrough ───────────────────────────────────────────────

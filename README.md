@@ -48,6 +48,16 @@ ghidra-rpc xrefs-to ls strcmp
 ghidra-rpc rename-function ls FUN_00401234 parse_args
 ```
 
+To see all running daemon instances and attach to an existing one:
+
+```bash
+ghidra-rpc list-instances
+# {"ok": true, "result": {"instances": [{"project": "/tmp/work.gpr", "mode": "headless", "pid": 84712, ...}], "count": 1}}
+
+export GHIDRA_RPC_PROJECT=/tmp/work.gpr
+ghidra-rpc list-binaries   # attach to the existing session
+```
+
 See [docs/install.md](docs/install.md) for prerequisites and
 [docs/quickstart.md](docs/quickstart.md) for a full walkthrough.
 
@@ -66,6 +76,31 @@ Ghidra loads the binary once and stays warm between commands — no re-analysis 
 every invocation. All changes (renames, comments, type definitions, patches) are
 saved to the Ghidra project after every command and remain visible when you open the
 project in the Ghidra GUI.
+
+## Runtime Paths
+
+All paths use an 8-character hash derived from the absolute `.gpr` project path,
+so each project gets its own deterministic socket and session file with no
+collisions.
+
+| Path | Purpose |
+|------|---------|
+| `/tmp/ghidra-rpc-<hash>.sock` | Unix socket for a running daemon |
+| `/tmp/ghidra-rpc-<hash>.log` | Background daemon log (`--detach` mode) |
+| `<project-dir>/.ghidra-rpc-<hash>.json` | Per-project session file (default, alongside `.gpr`) |
+| `$GHIDRA_RPC_STATE_DIR/<hash>.json` | Per-project session file when override is set |
+| `~/Library/Application Support/ghidra-rpc/sessions.json` | Global session registry (macOS) |
+| `~/.local/state/ghidra-rpc/sessions.json` | Global session registry (Linux) |
+| `$XDG_STATE_HOME/ghidra-rpc/sessions.json` | Global session registry (Linux, if `$XDG_STATE_HOME` set) |
+| `$GHIDRA_RPC_STATE_DIR/sessions.json` | Global session registry when override is set |
+
+`$GHIDRA_RPC_STATE_DIR` is a single knob that redirects **both** per-project
+session files and the global registry to a custom directory — useful in
+sandboxed or CI environments.
+
+The global session registry is maintained automatically: `start` adds an entry,
+`stop` removes it, and `list-instances` prunes any entries whose socket file has
+disappeared (e.g. after a crash).
 
 ## Documentation
 

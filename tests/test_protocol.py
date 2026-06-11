@@ -86,6 +86,14 @@ class TestProtocol:
         assert resp["ok"] is True
         assert resp["result"]["status"] == "alive"
 
+    def test_ping_returns_session_metadata(self):
+        """Ping response must include project_gpr, mode, and pid."""
+        resp = _send_request(self.sock_path, "ping")
+        result = resp["result"]
+        assert "project_gpr" in result
+        assert result["mode"] == "headless"
+        assert isinstance(result["pid"], int) and result["pid"] > 0
+
     def test_echo_handler(self):
         resp = _send_request(self.sock_path, "echo", {"hello": "world"})
         assert resp["ok"] is True

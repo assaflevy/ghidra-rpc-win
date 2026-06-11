@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -68,13 +70,6 @@ def load(gpr: Path) -> Session | None:
     """Load a previously saved session, or return None if not found."""
     path = session_file_path(gpr)
     if not path.exists():
-        # Backward compat: check the legacy ~/.local/share/ghidra-rpc/ location
-        # used by versions before GHIDRA_RPC_STATE_DIR support was added.
-        digest = hashlib.sha256(str(gpr.resolve()).encode()).hexdigest()[:8]
-        legacy_path = Path.home() / ".local" / "share" / "ghidra-rpc" / f"{digest}.json"
-        if legacy_path.exists():
-            path = legacy_path
-    if not path.exists():
         return None
     try:
         data = json.loads(path.read_text())
@@ -94,3 +89,108 @@ def remove(gpr: Path) -> None:
     path = session_file_path(gpr)
     if path.exists():
         path.unlink()
+
+
+# ─── Global session registry ───────────────────────────────────────────────────
+# The registry is a single JSON file that indexes every active session so that
+# `list-instances` can enumerate them without knowing the project paths upfront.
+#
+# Location priority:
+#   1. $GHIDRA_RPC_STATE_DIR/sessions.json   (explicit override)
+#   2. ~/Library/Application Support/ghidra-rpc/sessions.json  (macOS)
+#   3. $XDG_STATE_HOME/ghidra-rpc/sessions.json                (Linux, if set)
+#   4. ~/.local/state/ghidra-rpc/sessions.json                 (Linux default)
+#
+# All reads/writes are protected by an exclusive flock so concurrent daemon
+# starts don't corrupt the file.  Registry failures are non-fatal — callers
+# degrade gracefully to /tmp globbing.
+
+
+def _registry_path() -> Path:
+    """Return the path to the global session registry file."""
+    state_dir = os.environ.get("GHIDRA_RPC_STATE_DIR")
+    if state_dir:
+        return Path(state_dir) / "sessions.json"
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "ghidra-rpc"
+    else:
+        xdg = os.environ.get("XDG_STATE_HOME")
+        base = Path(xdg) / "ghidra-rpc" if xdg else Path.home() / ".local" / "state" / "ghidra-rpc"
+    return base / "sessions.json"
+
+
+def register(session: Session) -> None:
+    """Upsert a session into the global registry (flock-protected, non-fatal)."""
+    path = _registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(str(session.project_gpr.resolve()).encode()).hexdigest()[:8]
+    entry = {
+        "project_gpr":       str(session.project_gpr.resolve()),
+        "socket_path":       str(session.socket_path),
+        "mode":              session.mode,
+        "ghidra_install_dir": str(session.ghidra_install_dir) if session.ghidra_install_dir else None,
+    }
+    try:
+        with open(path, "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            fh.seek(0)
+            content = fh.read()
+            try:
+                registry = json.loads(content) if content.strip() else {}
+            except json.JSONDecodeError:
+                registry = {}
+            registry[digest] = entry
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(registry, indent=2))
+    except OSError:
+        pass  # Non-fatal: list-instances degrades to /tmp glob
+
+
+def unregister(gpr: Path) -> None:
+    """Remove a session from the global registry (flock-protected, non-fatal)."""
+    path = _registry_path()
+    if not path.exists():
+        return
+    digest = hashlib.sha256(str(gpr.resolve()).encode()).hexdigest()[:8]
+    try:
+        with open(path, "r+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            content = fh.read()
+            try:
+                registry = json.loads(content) if content.strip() else {}
+            except json.JSONDecodeError:
+                return
+            if digest not in registry:
+                return
+            del registry[digest]
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(registry, indent=2))
+    except OSError:
+        pass
+
+
+def load_all() -> list["Session"]:
+    """Return all sessions from the global registry (empty list on any error)."""
+    path = _registry_path()
+    if not path.exists():
+        return []
+    try:
+        content = path.read_text()
+        registry = json.loads(content) if content.strip() else {}
+    except (json.JSONDecodeError, OSError):
+        return []
+    sessions = []
+    for entry in registry.values():
+        try:
+            ghidra_dir = entry.get("ghidra_install_dir")
+            sessions.append(Session(
+                mode=entry["mode"],
+                project_gpr=Path(entry["project_gpr"]),
+                socket_path=Path(entry["socket_path"]),
+                ghidra_install_dir=Path(ghidra_dir) if ghidra_dir else None,
+            ))
+        except (KeyError, TypeError):
+            continue
+    return sessions

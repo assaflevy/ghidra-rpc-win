@@ -38,7 +38,7 @@ def register_handler(cmd: str, handler):
     _HANDLERS[cmd] = handler
 
 
-def _handle_connection(conn: socket.socket, ctx: Any, shutdown_event: threading.Event):
+def _handle_connection(conn: socket.socket, ctx: Any, shutdown_event: threading.Event, session: Session):
     """Handle a single client connection: read request, dispatch, send response."""
     try:
         buf = b""
@@ -70,7 +70,16 @@ def _handle_connection(conn: socket.socket, ctx: Any, shutdown_event: threading.
 
         # Built-in commands
         if cmd == "ping":
-            response = {"id": req_id, "ok": True, "result": {"status": "alive"}}
+            response = {
+                "id": req_id,
+                "ok": True,
+                "result": {
+                    "status":      "alive",
+                    "project_gpr": str(session.project_gpr),
+                    "mode":        session.mode,
+                    "pid":         os.getpid(),
+                },
+            }
         elif cmd == "stop":
             response = {"id": req_id, "ok": True, "result": {"status": "stopping"}}
             conn.sendall((json.dumps(response) + "\n").encode())
@@ -150,7 +159,7 @@ def run_server(session: Session, ctx: Any) -> None:
             # Handle each connection in a thread so the server stays responsive
             t = threading.Thread(
                 target=_handle_connection,
-                args=(conn, ctx, shutdown_event),
+                args=(conn, ctx, shutdown_event, session),
                 daemon=True,
             )
             t.start()

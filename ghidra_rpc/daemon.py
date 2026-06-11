@@ -54,6 +54,7 @@ def start_blocking(session: Session) -> None:
     from ghidra_rpc.server.main import run_server
 
     session_mod.save(session)
+    session_mod.register(session)
 
     if session.mode == "headless":
         from ghidra_rpc.server.launcher import create_headless_context
@@ -69,6 +70,7 @@ def start_blocking(session: Session) -> None:
     finally:
         if hasattr(ctx, "close"):
             ctx.close()
+        session_mod.unregister(session.project_gpr)
         session_mod.remove(session.project_gpr)
 
 
@@ -81,6 +83,7 @@ def start_background(session: Session, timeout: float = 60.0) -> None:
     from ghidra_rpc import session as session_mod
 
     session_mod.save(session)
+    session_mod.register(session)
 
     # Log file alongside the socket, named by session hash
     socket_stem = session.socket_path.stem  # e.g. ghidra-rpc-9990be1c
