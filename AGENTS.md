@@ -98,9 +98,14 @@ ghidra-rpc/
 │                                    extracts inline calling conventions (__thiscall, etc.)
 │
 └── tests/
-    ├── test_protocol.py  — Wire protocol tests (no Ghidra needed)
-    ├── test_client.py    — Client + session tests (no Ghidra needed)
-    └── test_tools.py     — Integration tests (require Ghidra, skipped by default)
+    ├── test_protocol.py         — Wire protocol tests (no Ghidra needed)
+    ├── test_client.py           — Client + session tests (no Ghidra needed)
+    ├── test_session_registry.py — Registry, discover-instances, list-instances CLI
+    └── test_integration.py      — End-to-end integration tests against a real headless
+                                   Ghidra daemon loading /usr/bin/ls; 69 tests covering
+                                   every API domain.  Skipped unless GHIDRA_INSTALL_DIR
+                                   is set.  Uses a single module-scoped daemon fixture
+                                   so Ghidra starts only once per pytest run.
 ```
 
 ## Architecture
@@ -192,7 +197,14 @@ uv venv && uv pip install -e .
 
 ### Running Tests (no Ghidra needed)
 ```bash
-python -m pytest tests/test_protocol.py tests/test_client.py -v
+python -m pytest tests/test_protocol.py tests/test_client.py tests/test_session_registry.py -v
+```
+
+### Running Integration Tests (requires Ghidra)
+```bash
+# Starts a real headless daemon, loads /usr/bin/ls, exercises all 69 API tests.
+# First run is slow (JVM + analysis); budget ~10 min on a typical laptop.
+GHIDRA_INSTALL_DIR=/path/to/ghidra pytest tests/test_integration.py -v
 ```
 
 ### Manual Testing with Ghidra

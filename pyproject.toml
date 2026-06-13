@@ -30,3 +30,8 @@ packages = ["ghidra_rpc"]
 
 [tool.pi]
 skills = ["./SKILL.md"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

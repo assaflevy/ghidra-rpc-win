@@ -108,7 +108,7 @@ def start_background(session: Session, timeout: float = 60.0) -> None:
         "--project", str(session.project_gpr),
     ]
     with open(log_path, "a") as log_fh:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             stdout=log_fh,
             stderr=log_fh,
@@ -116,11 +116,24 @@ def start_background(session: Session, timeout: float = 60.0) -> None:
             env=env,
         )
 
-    # Wait for socket to appear and become responsive
+    # Wait for socket to appear and become responsive.
+    # Also watch for the subprocess dying early (wrong Python, missing dep, etc.)
+    # so we fail fast instead of burning the full timeout.
     deadline = time.time() + timeout
     while time.time() < deadline:
         if is_running(session.socket_path):
             return
+        exit_code = proc.poll()
+        if exit_code is not None:
+            # Process already exited — read whatever landed in the log.
+            try:
+                log_tail = log_path.read_text()[-2000:]
+            except OSError:
+                log_tail = "(log not readable)"
+            raise RuntimeError(
+                f"Daemon process exited immediately with code {exit_code}.\n"
+                f"Log ({log_path}):\n{log_tail}"
+            )
         time.sleep(0.5)
 
     raise TimeoutError(
