@@ -28,11 +28,22 @@ def _resolve_address(pi, target: str):
     except ValueError:
         pass
 
-    # Try as symbol
+    # Try as symbol — prefer non-external (e.g. PLT thunk) over EXTERNAL space symbols.
+    # In ELF binaries an imported function like 'malloc' has both a PLT thunk at a real
+    # code address AND an entry in the EXTERNAL address space.  Callers reference the PLT
+    # thunk, so we must prefer that address for xref lookups.
     st = prog.getSymbolTable()
+    external_fallback = None
     for sym in st.getAllSymbols(False):
         if str(sym.getName()).lower() == target.lower():
-            return sym.getAddress()
+            addr = sym.getAddress()
+            if not addr.getAddressSpace().isExternalSpace():
+                return addr  # non-external (PLT thunk / IAT entry) — use immediately
+            if external_fallback is None:
+                external_fallback = addr
+
+    if external_fallback is not None:
+        return external_fallback
 
     raise ValueError(f"Cannot resolve target '{target}' to an address.")
 
@@ -51,16 +62,35 @@ def _handle_xrefs_to(ctx, args: dict) -> dict:
     rm = pi.program.getReferenceManager()
     fm = pi.program.getFunctionManager()
 
+    # When the resolved address falls in the EXTERNAL address space (e.g. the user
+    # passed the import's EXTERNAL symbol address directly), callers don't reference
+    # that synthetic address — they call through thunk/PLT stubs.  Collect xrefs to
+    # all thunk functions whose immediate thunk target is this external address so that
+    # callers of the import are included in the results.
+    addrs_to_check = [addr]
+    if addr.getAddressSpace().isExternalSpace():
+        for func in fm.getFunctions(True):
+            if func.isThunk():
+                try:
+                    thunked = func.getThunkedFunction(False)
+                    if thunked is not None and str(thunked.getEntryPoint()) == str(addr):
+                        addrs_to_check.append(func.getEntryPoint())
+                except Exception:
+                    pass
+
     xrefs = []
-    for ref in rm.getReferencesTo(addr):
+    for check_addr in addrs_to_check:
+        for ref in rm.getReferencesTo(check_addr):
+            if len(xrefs) >= limit:
+                break
+            from_func = fm.getFunctionContaining(ref.getFromAddress())
+            xrefs.append({
+                "from_address": str(ref.getFromAddress()),
+                "from_function": str(from_func.getName()) if from_func else None,
+                "type": str(ref.getReferenceType()),
+            })
         if len(xrefs) >= limit:
             break
-        from_func = fm.getFunctionContaining(ref.getFromAddress())
-        xrefs.append({
-            "from_address": str(ref.getFromAddress()),
-            "from_function": str(from_func.getName()) if from_func else None,
-            "type": str(ref.getReferenceType()),
-        })
 
     return {"xrefs": xrefs, "count": len(xrefs)}
 
