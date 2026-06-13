@@ -1186,6 +1186,43 @@ class TestTags:
         )
 
 
+# ── Variable-discovery helper ───────────────────────────────────────────────
+
+def _discover_variables(sock, binary, func_name, timeout=_RPC_TIMEOUT):
+    """Return list of high-variable names visible in *func_name*'s decompiler view.
+
+    Works by sending ``retype_variable`` with a sentinel name that will never
+    match any real symbol.  The resulting ``DaemonError`` message always
+    contains ``"Available: [...]"`` which is parsed with ``ast.literal_eval``.
+    Returns ``[]`` if the function has no decompiler variables or parsing fails.
+    """
+    import ast
+    import re
+    from ghidra_rpc.client import DaemonError, send_request
+
+    try:
+        send_request(
+            sock,
+            "retype_variable",
+            {
+                "binary":    binary,
+                "func":      func_name,
+                "variable":  "__ghidra_rpc_probe_xyz__",
+                "data_type": "int",
+            },
+            socket_timeout=timeout,
+        )
+        return []   # shouldn't happen — probe name is deliberately bogus
+    except DaemonError as exc:
+        m = re.search(r"Available:\s*(\[.*\])", str(exc), re.DOTALL)
+        if m:
+            try:
+                return ast.literal_eval(m.group(1))
+            except Exception:
+                pass
+    return []
+
+
 # ── 13. Save ──────────────────────────────────────────────────────────────────
 
 class TestSave:
@@ -1203,3 +1240,389 @@ class TestSave:
         result = rpc(daemon["sock"], "save", {})["result"]
         assert "saved" in result
         assert len(result["saved"]) > 0
+
+
+# ── 14. Retype variable ─────────────────────────────────────────────────────────
+
+class TestRetypeVariable:
+    """Integration tests for ``retype_variable``.
+
+    Uses ``sum_array`` (two int parameters plus int locals compiled at -O0),
+    which provides a reliable set of typed stack variables.
+
+    Each test restores the original type after itself so daemon state stays
+    clean for subsequent tests.
+    """
+
+    _FUNC = "sum_array"
+
+    # ---- Helpers -------------------------------------------------------
+
+    def _get_variable_names(self, daemon):
+        """Return sorted list of variable names visible in _FUNC, or skip."""
+        names = _discover_variables(
+            daemon["sock"], daemon["short_name"], self._FUNC
+        )
+        if not names:
+            pytest.skip(
+                f"No decompiler variables found in '{self._FUNC}' "
+                f"(Ghidra analysis may not have produced high variables)"
+            )
+        return names
+
+    def _pick_variable(self, daemon):
+        """Return a suitable variable name for type-change tests.
+
+        Prefers ``param_*`` names (int-typed integer parameters) since those
+        are the most stable across Ghidra versions.  Falls back to the first
+        available variable.
+        """
+        names = self._get_variable_names(daemon)
+        return next(
+            (n for n in names if n.startswith("param_")),
+            names[0],
+        )
+
+    # ---- Tests ---------------------------------------------------------
+
+    def test_retype_variable_response_fields(self, daemon):
+        """retype_variable response must contain all expected fields."""
+        var_name = self._pick_variable(daemon)
+
+        # Retype to ``long``; record old_type so we can restore below.
+        result = rpc(daemon["sock"], "retype_variable", {
+            "binary":    daemon["short_name"],
+            "func":      self._FUNC,
+            "variable":  var_name,
+            "data_type": "long",
+        })["result"]
+
+        required = {"function", "variable", "old_type", "new_type", "verified"}
+        missing = required - result.keys()
+        assert not missing, (
+            f"retype_variable response missing fields {missing}: {result}"
+        )
+        assert result["function"] == self._FUNC, (
+            f"Expected function='{self._FUNC}', got: {result['function']!r}"
+        )
+        assert result["variable"] == var_name, (
+            f"Expected variable='{var_name}', got: {result['variable']!r}"
+        )
+        assert isinstance(result["new_type"], str) and result["new_type"], (
+            f"new_type should be a non-empty string, got: {result['new_type']!r}"
+        )
+        assert isinstance(result["old_type"], str), (
+            f"old_type should be a string, got: {result['old_type']!r}"
+        )
+
+        # Cleanup: restore to original type; fall back to 'int' if restore fails.
+        old_type = result["old_type"]
+        for restore_type in (old_type, "int"):
+            try:
+                rpc(daemon["sock"], "retype_variable", {
+                    "binary":    daemon["short_name"],
+                    "func":      self._FUNC,
+                    "variable":  var_name,
+                    "data_type": restore_type,
+                })
+                break
+            except Exception:
+                continue
+
+    def test_retype_variable_changes_type(self, daemon):
+        """Retyping to a different type must produce a different new_type.
+
+        Steps:
+        1. Retype to ``int``   (known baseline; records old_type).
+        2. Retype to ``long``  (the actual change under test).
+        3. Verify new_type from step 2 differs from the ``int`` baseline.
+        4. Cleanup: retype back to ``int``.
+        """
+        var_name = self._pick_variable(daemon)
+
+        # Step 1: normalise to int so we have a known-good before state.
+        rpc(daemon["sock"], "retype_variable", {
+            "binary":    daemon["short_name"],
+            "func":      self._FUNC,
+            "variable":  var_name,
+            "data_type": "int",
+        })
+
+        # Step 2: retype to long.
+        result = rpc(daemon["sock"], "retype_variable", {
+            "binary":    daemon["short_name"],
+            "func":      self._FUNC,
+            "variable":  var_name,
+            "data_type": "long",
+        })["result"]
+
+        # old_type is whatever step 1 produced (likely "int");
+        # new_type must differ since int (4 bytes) ≠ long (8 bytes) on x86-64.
+        assert result["old_type"] != result["new_type"], (
+            f"Retype int → long should produce different types; "
+            f"old_type={result['old_type']!r}, new_type={result['new_type']!r}"
+        )
+
+        # Cleanup.
+        try:
+            rpc(daemon["sock"], "retype_variable", {
+                "binary":    daemon["short_name"],
+                "func":      self._FUNC,
+                "variable":  var_name,
+                "data_type": "int",
+            })
+        except Exception:
+            pass
+
+    def test_retype_variable_nonexistent_variable_errors(self, daemon):
+        """Retyping a variable that doesn't exist must raise a clear error."""
+        from ghidra_rpc.client import DaemonError, send_request
+
+        try:
+            send_request(
+                daemon["sock"], "retype_variable",
+                {
+                    "binary":    daemon["short_name"],
+                    "func":      self._FUNC,
+                    "variable":  "_no_such_variable_xyz_",
+                    "data_type": "int",
+                },
+                socket_timeout=_RPC_TIMEOUT,
+            )
+            pytest.fail("Expected DaemonError for nonexistent variable")
+        except DaemonError as exc:
+            assert exc.error in ("ValueError", "RuntimeError", "Exception"), (
+                f"Unexpected error type: {exc.error}"
+            )
+            # The error message should name the missing variable.
+            assert "_no_such_variable_xyz_" in str(exc), (
+                f"Expected variable name in error message: {exc}"
+            )
+
+    def test_retype_variable_unknown_type_errors(self, daemon):
+        """Retyping to a completely unknown type must raise a clear error."""
+        from ghidra_rpc.client import DaemonError, send_request
+
+        names = _discover_variables(
+            daemon["sock"], daemon["short_name"], self._FUNC
+        )
+        if not names:
+            pytest.skip(f"No decompiler variables found in '{self._FUNC}'")
+
+        try:
+            send_request(
+                daemon["sock"], "retype_variable",
+                {
+                    "binary":    daemon["short_name"],
+                    "func":      self._FUNC,
+                    "variable":  names[0],
+                    "data_type": "_completely_bogus_type_xyz_",
+                },
+                socket_timeout=_RPC_TIMEOUT,
+            )
+            pytest.fail("Expected DaemonError for unknown type")
+        except DaemonError as exc:
+            assert exc.error in ("ValueError", "RuntimeError", "Exception"), (
+                f"Unexpected error type: {exc.error}"
+            )
+
+    def test_retype_variable_nonexistent_function_errors(self, daemon):
+        """Retyping a variable in a nonexistent function must raise a clear error."""
+        from ghidra_rpc.client import DaemonError, send_request
+
+        try:
+            send_request(
+                daemon["sock"], "retype_variable",
+                {
+                    "binary":   daemon["short_name"],
+                    "func":     "_nonexistent_func_xyz_",
+                    "variable": "param_1",
+                    "data_type": "int",
+                },
+                socket_timeout=_RPC_TIMEOUT,
+            )
+            pytest.fail("Expected DaemonError for nonexistent function")
+        except DaemonError as exc:
+            assert exc.error in ("ValueError", "RuntimeError", "Exception"), (
+                f"Unexpected error type: {exc.error}"
+            )
+
+
+# ── 15. Rename variable ─────────────────────────────────────────────────────────
+
+class TestRenameVariable:
+    """Integration tests for ``rename_variable``.
+
+    Uses ``factorial`` (one int parameter; simple recursive structure at -O0)
+    so the decompiler consistently exposes at least one renaming target.
+
+    Every test renames the variable back to its original name as cleanup so
+    subsequent tests and functions see a consistent state.
+    """
+
+    _FUNC = "factorial"
+
+    # ---- Helpers -------------------------------------------------------
+
+    def _pick_variable(self, daemon):
+        """Return a stable variable name to rename in _FUNC, or skip.
+
+        Prefers ``param_*`` names (the most deterministic across Ghidra versions)
+        and falls back to the first available name.
+        """
+        names = _discover_variables(
+            daemon["sock"], daemon["short_name"], self._FUNC
+        )
+        if not names:
+            pytest.skip(
+                f"No decompiler variables found in '{self._FUNC}' "
+                f"(Ghidra analysis may not have produced high variables)"
+            )
+        return next(
+            (n for n in names if n.startswith("param_")),
+            names[0],
+        )
+
+    # ---- Tests ---------------------------------------------------------
+
+    def test_rename_variable_response_fields(self, daemon):
+        """rename_variable response must contain all expected fields."""
+        var_name = self._pick_variable(daemon)
+        uid      = uuid.uuid4().hex[:8]
+        new_name = f"_rnvar_{uid}"
+
+        result = rpc(daemon["sock"], "rename_variable", {
+            "binary":   daemon["short_name"],
+            "func":     self._FUNC,
+            "variable": var_name,
+            "new_name": new_name,
+        })["result"]
+
+        required = {"function", "variable", "new_name", "verified"}
+        missing = required - result.keys()
+        assert not missing, (
+            f"rename_variable response missing fields {missing}: {result}"
+        )
+        assert result["function"] == self._FUNC, (
+            f"Expected function='{self._FUNC}', got: {result['function']!r}"
+        )
+        assert result["variable"] == var_name, (
+            f"Expected variable='{var_name}', got: {result['variable']!r}"
+        )
+        assert result["new_name"] == new_name, (
+            f"Expected new_name='{new_name}', got: {result['new_name']!r}"
+        )
+
+        # Cleanup: rename back to the original name.
+        rpc(daemon["sock"], "rename_variable", {
+            "binary":   daemon["short_name"],
+            "func":     self._FUNC,
+            "variable": new_name,
+            "new_name": var_name,
+        })
+
+    def test_rename_variable_verified_true_on_success(self, daemon):
+        """verified must be True when the rename succeeds."""
+        var_name = self._pick_variable(daemon)
+        uid      = uuid.uuid4().hex[:8]
+        new_name = f"_rnverified_{uid}"
+
+        result = rpc(daemon["sock"], "rename_variable", {
+            "binary":   daemon["short_name"],
+            "func":     self._FUNC,
+            "variable": var_name,
+            "new_name": new_name,
+        })["result"]
+
+        assert result["verified"] is True, (
+            f"Expected verified=True after rename; got: {result}"
+        )
+
+        # Cleanup.
+        rpc(daemon["sock"], "rename_variable", {
+            "binary":   daemon["short_name"],
+            "func":     self._FUNC,
+            "variable": new_name,
+            "new_name": var_name,
+        })
+
+    def test_rename_variable_persists_in_decompile(self, daemon):
+        """After renaming, the new variable name must appear in re-decompiled code.
+
+        The ``rename_variable`` handler calls ``decompiler_pool.invalidate_all()``
+        so the very next ``decompile`` call should reflect the updated symbol.
+        """
+        var_name = self._pick_variable(daemon)
+        uid      = uuid.uuid4().hex[:8]
+        new_name = f"rnpersist_{uid}"
+
+        rpc(daemon["sock"], "rename_variable", {
+            "binary":   daemon["short_name"],
+            "func":     self._FUNC,
+            "variable": var_name,
+            "new_name": new_name,
+        })
+
+        # Re-decompile and check the new name appears in the output.
+        c_code = rpc(daemon["sock"], "decompile", {
+            "binary":  daemon["short_name"],
+            "func":    self._FUNC,
+            "timeout": 60,
+        })["result"]["c_code"]
+
+        assert new_name in c_code, (
+            f"Renamed variable '{new_name}' not found in decompiled code:\n{c_code}"
+        )
+
+        # Cleanup: rename back to original.
+        rpc(daemon["sock"], "rename_variable", {
+            "binary":   daemon["short_name"],
+            "func":     self._FUNC,
+            "variable": new_name,
+            "new_name": var_name,
+        })
+
+    def test_rename_variable_nonexistent_variable_errors(self, daemon):
+        """Renaming a variable that doesn't exist must raise a clear error."""
+        from ghidra_rpc.client import DaemonError, send_request
+
+        try:
+            send_request(
+                daemon["sock"], "rename_variable",
+                {
+                    "binary":   daemon["short_name"],
+                    "func":     self._FUNC,
+                    "variable": "_no_such_var_xyz_",
+                    "new_name": "something",
+                },
+                socket_timeout=_RPC_TIMEOUT,
+            )
+            pytest.fail("Expected DaemonError for nonexistent variable")
+        except DaemonError as exc:
+            assert exc.error in ("ValueError", "RuntimeError", "Exception"), (
+                f"Unexpected error type: {exc.error}"
+            )
+            assert "_no_such_var_xyz_" in str(exc), (
+                f"Expected variable name in error message: {exc}"
+            )
+
+    def test_rename_variable_nonexistent_function_errors(self, daemon):
+        """Renaming a variable in a nonexistent function must raise a clear error."""
+        from ghidra_rpc.client import DaemonError, send_request
+
+        try:
+            send_request(
+                daemon["sock"], "rename_variable",
+                {
+                    "binary":   daemon["short_name"],
+                    "func":     "_nonexistent_func_xyz_",
+                    "variable": "param_1",
+                    "new_name": "something",
+                },
+                socket_timeout=_RPC_TIMEOUT,
+            )
+            pytest.fail("Expected DaemonError for nonexistent function")
+        except DaemonError as exc:
+            assert exc.error in ("ValueError", "RuntimeError", "Exception"), (
+                f"Unexpected error type: {exc.error}"
+            )

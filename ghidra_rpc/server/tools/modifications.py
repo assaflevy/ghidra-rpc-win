@@ -54,7 +54,7 @@ def _resolve_data_type(program, type_str: str):
     - Array decoration:  ``char[11]``, ``int[4]``, …
     - DTM lookup by name or full path: any type already in the program's
       data type manager (structs, enums, typedefs, …)
-    
+
     Note: Ghidra's DataTypeParser requires a GUI DataTypeQueryService so it
     cannot be used in headless mode. This function implements the common cases
     directly via the Ghidra data-model API.
@@ -730,7 +730,7 @@ def _handle_rename_variable(ctx, args: dict) -> dict:
             f"Available: {sorted(all_names)}"
         )
 
-    # ---- Step 2: commit the type change (on Swing EDT in GUI mode) -----------
+    # ---- Step 2: commit the name change (on Swing EDT in GUI mode) -----------
     def do_update():
         from ghidra.program.model.pcode import HighFunctionDBUtil
         from ghidra.program.model.symbol import SourceType
