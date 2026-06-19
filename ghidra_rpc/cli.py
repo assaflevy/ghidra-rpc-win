@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from ghidra_rpc import __version__
+from ghidra_rpc import transport
 
 
 class HexInt(click.ParamType):
@@ -65,15 +66,15 @@ def _json_error(error: str, message: str) -> None:
 
 
 def _discover_instances(include_dead: bool = False) -> list[dict]:
-    """Discover all ghidra-rpc daemon instances via registry + /tmp glob.
+    """Discover all ghidra-rpc daemon instances via registry + endpoint scan.
 
     Merges entries from the global session registry with any
-    ``/tmp/ghidra-rpc-*.sock`` files not already in the registry (catches
-    pre-registry installs and manually started daemons).  Each candidate is
-    probed with a short-timeout ping so liveness is always authoritative.
+    platform endpoint files not already in the registry (catches pre-registry
+    installs and manually started daemons).  Each candidate is probed with a
+    short-timeout ping so liveness is always authoritative.
 
     When *include_dead* is False (default) only live instances are returned.
-    Registry entries whose socket file has disappeared are pruned automatically.
+    Registry entries whose endpoint file has disappeared are pruned automatically.
     """
     from ghidra_rpc.client import send_request
 
@@ -88,12 +89,12 @@ def _discover_instances(include_dead: bool = False) -> list[dict]:
         return None
 
     # Registry entries take precedence (they carry ghidra_install_dir etc.);
-    # the /tmp glob catches anything not registered.
+    # endpoint discovery catches anything not registered.
     candidates: dict[str, dict] = {}  # str(socket_path) -> {socket, session}
     for sess in session_mod.load_all():
         key = str(sess.socket_path)
         candidates[key] = {"socket": sess.socket_path, "session": sess}
-    for sock_path in sorted(Path("/tmp").glob("ghidra-rpc-*.sock")):
+    for sock_path in transport.discover_endpoint_paths():
         key = str(sock_path)
         if key not in candidates:
             candidates[key] = {"socket": sock_path, "session": None}
@@ -278,7 +279,7 @@ def restart(project: str | None, headless: bool | None, timeout: float | None,
     except TimeoutError as e:
         # For GUI mode the socket is created once the server starts listening, but
         # Ghidra's own startup (project load, analysis catch-up) can push responsiveness
-        # beyond even a generous timeout.  If the socket file already exists the server
+        # beyond even a generous timeout.  If the endpoint file already exists the server
         # IS up; treat as a non-fatal warning so callers aren't misled.
         if session.mode == "gui" and sock.exists():
             _json_output({
@@ -387,10 +388,10 @@ def stop(project: str | None, stop_all: bool):
 def list_instances(include_dead: bool):
     """List all known ghidra-rpc daemon instances.
 
-    Discovers instances from the global session registry and from any
-    /tmp/ghidra-rpc-*.sock files not already in the registry.  Each entry
-    is probed for liveness; stale registry entries (socket file gone) are
-    pruned automatically.
+    Discovers instances from the global session registry and from any platform
+    endpoint files not already in the registry.  Each entry is probed for
+    liveness; stale registry entries (endpoint file gone) are pruned
+    automatically.
 
     Use the reported project path with --project (or GHIDRA_RPC_PROJECT) to
     attach to an existing session:

@@ -1,4 +1,4 @@
-"""Tests for the Unix socket protocol and server dispatch."""
+"""Tests for the RPC protocol and server dispatch."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+from ghidra_rpc import transport
 
 
 # We need to test the server without Ghidra, so mock the tool registration
@@ -31,9 +33,7 @@ def _send_request(sock_path: Path, cmd: str, args: dict | None = None) -> dict:
         "cmd": cmd,
         "args": args or {},
     }
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(5)
-    s.connect(str(sock_path))
+    s = transport.connect(sock_path, timeout=5)
     s.sendall((json.dumps(request) + "\n").encode())
     buf = b""
     while b"\n" not in buf:
@@ -61,7 +61,7 @@ class TestProtocol:
 
         server_main.register_handler("echo", echo_handler)
 
-        self.sock_path = tmp_path / "test.sock"
+        self.sock_path = tmp_path / ("test.port" if transport.IS_WINDOWS else "test.sock")
         from ghidra_rpc.session import Session
         session = Session(mode="headless", project_gpr=tmp_path / "test.gpr", socket_path=self.sock_path)
 
@@ -116,9 +116,7 @@ class TestProtocol:
         assert not self.sock_path.exists()
 
     def test_invalid_json(self):
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect(str(self.sock_path))
+        s = transport.connect(self.sock_path, timeout=5)
         s.sendall(b"not valid json\n")
         buf = b""
         while b"\n" not in buf:
@@ -134,9 +132,7 @@ class TestProtocol:
     def test_request_id_echoed(self):
         req_id = "test-id-12345"
         request = {"id": req_id, "cmd": "ping", "args": {}}
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect(str(self.sock_path))
+        s = transport.connect(self.sock_path, timeout=5)
         s.sendall((json.dumps(request) + "\n").encode())
         buf = b""
         while b"\n" not in buf:

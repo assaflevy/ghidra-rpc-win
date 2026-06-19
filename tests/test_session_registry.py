@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ghidra_rpc import transport
 from ghidra_rpc.session import (
     Session,
     _registry_path,
@@ -36,7 +37,7 @@ def _make_session(tmp_path: Path, name: str = "test") -> Session:
     return Session(
         mode="headless",
         project_gpr=gpr,
-        socket_path=tmp_path / f"ghidra-rpc-{name}.sock",
+        socket_path=tmp_path / f"ghidra-rpc-{name}{'.port' if transport.IS_WINDOWS else '.sock'}",
     )
 
 
@@ -44,7 +45,7 @@ def _start_mock_server(session: Session) -> threading.Thread:
     """Spin up a real RPC server for *session* in a daemon thread.
 
     Clears the handler registry first (we only need the built-in ``ping``),
-    then waits until the socket file appears before returning.
+    then waits until the endpoint file appears before returning.
     """
     from ghidra_rpc.server import main as server_main
 
@@ -82,14 +83,14 @@ class TestRegistryPath:
         assert _registry_path() == tmp_path / "state" / "sessions.json"
 
     def test_xdg_state_home_used_on_linux(self, tmp_path, monkeypatch):
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             pytest.skip("XDG_STATE_HOME is not used on macOS")
         monkeypatch.delenv("GHIDRA_RPC_STATE_DIR", raising=False)
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
         assert _registry_path() == tmp_path / "ghidra-rpc" / "sessions.json"
 
     def test_linux_default_is_local_state(self, monkeypatch):
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             pytest.skip("Linux-specific default")
         monkeypatch.delenv("GHIDRA_RPC_STATE_DIR", raising=False)
         monkeypatch.delenv("XDG_STATE_HOME", raising=False)
@@ -102,6 +103,14 @@ class TestRegistryPath:
         monkeypatch.delenv("GHIDRA_RPC_STATE_DIR", raising=False)
         path = _registry_path()
         assert path == Path.home() / "Library" / "Application Support" / "ghidra-rpc" / "sessions.json"
+
+    def test_windows_default_uses_local_appdata(self, tmp_path, monkeypatch):
+        if sys.platform != "win32":
+            pytest.skip("Windows-specific default")
+        monkeypatch.delenv("GHIDRA_RPC_STATE_DIR", raising=False)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+        path = _registry_path()
+        assert path == tmp_path / "LocalAppData" / "ghidra-rpc" / "sessions.json"
 
     def test_result_always_named_sessions_json(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GHIDRA_RPC_STATE_DIR", str(tmp_path))
@@ -242,7 +251,7 @@ class TestDiscoverInstances:
         """Registered session with no running daemon is hidden by default."""
         sess = _make_session(tmp_path)
         register(sess)
-        # socket file does not exist → not running
+        # endpoint file does not exist -> not running
 
         from ghidra_rpc.cli import _discover_instances
         assert _discover_instances(include_dead=False) == []
@@ -263,11 +272,11 @@ class TestDiscoverInstances:
         assert inst["pid"] is None
 
     def test_stale_entry_pruned_when_socket_file_gone(self, tmp_path):
-        """If the socket file has disappeared, the registry entry is auto-pruned."""
+        """If the endpoint file has disappeared, the registry entry is auto-pruned."""
         sess = _make_session(tmp_path)
         register(sess)
         assert len(load_all()) == 1
-        # socket file never created → it's gone
+        # endpoint file never created -> it's gone
 
         from ghidra_rpc.cli import _discover_instances
         _discover_instances(include_dead=False)
@@ -278,7 +287,7 @@ class TestDiscoverInstances:
         """With include_dead=True, stale entries appear in output but are still pruned."""
         sess = _make_session(tmp_path)
         register(sess)
-        # socket file absent → stale
+        # endpoint file absent -> stale
 
         from ghidra_rpc.cli import _discover_instances
         instances = _discover_instances(include_dead=True)
@@ -290,13 +299,10 @@ class TestDiscoverInstances:
         assert load_all() == []
 
     def test_unregistered_socket_discovered_via_glob(self, tmp_path, monkeypatch):
-        """Sockets in /tmp not in the registry are still discovered via glob."""
-        # Create a socket file with the canonical naming pattern in /tmp
-        import hashlib
+        """Endpoint files not in the registry are still discovered via scan."""
         gpr = tmp_path / "unregistered.gpr"
         gpr.touch()
-        digest = hashlib.sha256(str(gpr.resolve()).encode()).hexdigest()[:8]
-        sock_path = Path("/tmp") / f"ghidra-rpc-{digest}.sock"
+        sock_path = transport.endpoint_path_for_project(gpr)
 
         sess = Session(mode="headless", project_gpr=gpr, socket_path=sock_path)
         # Deliberately do NOT register — only start the server
@@ -308,7 +314,7 @@ class TestDiscoverInstances:
             sockets = [i["socket"] for i in instances]
             assert str(sock_path) in sockets
         finally:
-            # Clean up the /tmp socket left by the daemon thread
+            # Clean up the endpoint left by the daemon thread
             if sock_path.exists():
                 sock_path.unlink()
 

@@ -10,19 +10,16 @@ import time
 from pathlib import Path
 
 from ghidra_rpc.session import Session
+from ghidra_rpc import transport
 
 
 def is_running(socket_path: Path) -> bool:
     """Check if a daemon is responsive at the given socket path."""
-    import socket as sock_mod
-
     if not socket_path.exists():
         return False
 
     try:
-        s = sock_mod.socket(sock_mod.AF_UNIX, sock_mod.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect(str(socket_path))
+        s = transport.connect(socket_path, timeout=5)
         # Send a ping
         import json
         import uuid
@@ -101,19 +98,26 @@ def start_background(session: Session, timeout: float = 60.0) -> None:
     if ghidra_dir:
         env["GHIDRA_INSTALL_DIR"] = ghidra_dir
 
-    # Launch ghidra-rpcd as a subprocess
+    # Launch ghidra-rpcd as a subprocess.  POSIX uses start_new_session; Windows
+    # gets its own process group so Ctrl+C in the caller does not kill the daemon.
     cmd = [
         sys.executable, "-m", "ghidra_rpc.daemon",
         "--mode", session.mode,
         "--project", str(session.project_gpr),
     ]
     with open(log_path, "a") as log_fh:
+        popen_kwargs = {
+            "stdout": log_fh,
+            "stderr": log_fh,
+            "env": env,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(
             cmd,
-            stdout=log_fh,
-            stderr=log_fh,
-            start_new_session=True,
-            env=env,
+            **popen_kwargs,
         )
 
     # Wait for socket to appear and become responsive.

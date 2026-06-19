@@ -64,7 +64,7 @@ See [docs/install.md](docs/install.md) for prerequisites and
 ## How It Works
 
 ```
-┌─────────────┐      Unix Socket       ┌──────────────────────────┐
+┌─────────────┐    Local RPC endpoint  ┌──────────────────────────┐
 │  LLM agent  │  ──── JSON/newline ──→ │  ghidra-rpc daemon       │
 │  (via CLI)  │  ←── JSON/newline ───  │  (PyGhidra + Ghidra JVM) │
 └─────────────┘                        └──────────────────────────┘
@@ -80,16 +80,20 @@ project in the Ghidra GUI.
 ## Runtime Paths
 
 All paths use an 8-character hash derived from the absolute `.gpr` project path,
-so each project gets its own deterministic socket and session file with no
-collisions.
+so each project gets its own deterministic endpoint and session file with no
+collisions. Unix-like platforms use Unix domain sockets. Windows uses a
+localhost TCP listener whose chosen port is stored in a small `.port` endpoint
+file under `%TEMP%`.
 
 | Path | Purpose |
 |------|---------|
-| `/tmp/ghidra-rpc-<hash>.sock` | Unix socket for a running daemon |
-| `/tmp/ghidra-rpc-<hash>.log` | Background daemon log (`--detach` mode) |
+| `/tmp/ghidra-rpc-<hash>.sock` | Unix socket for a running daemon (Linux/macOS) |
+| `%TEMP%\ghidra-rpc-<hash>.port` | Windows endpoint file containing the localhost TCP port |
+| `<endpoint-dir>/ghidra-rpc-<hash>.log` | Background daemon log (`--detach` mode) |
 | `<project-dir>/.ghidra-rpc-<hash>.json` | Per-project session file (default, alongside `.gpr`) |
 | `$GHIDRA_RPC_STATE_DIR/<hash>.json` | Per-project session file when override is set |
 | `~/Library/Application Support/ghidra-rpc/sessions.json` | Global session registry (macOS) |
+| `%LOCALAPPDATA%\ghidra-rpc\sessions.json` | Global session registry (Windows) |
 | `~/.local/state/ghidra-rpc/sessions.json` | Global session registry (Linux) |
 | `$XDG_STATE_HOME/ghidra-rpc/sessions.json` | Global session registry (Linux, if `$XDG_STATE_HOME` set) |
 | `$GHIDRA_RPC_STATE_DIR/sessions.json` | Global session registry when override is set |
@@ -99,7 +103,7 @@ session files and the global registry to a custom directory — useful in
 sandboxed or CI environments.
 
 The global session registry is maintained automatically: `start` adds an entry,
-`stop` removes it, and `list-instances` prunes any entries whose socket file has
+`stop` removes it, and `list-instances` prunes any entries whose endpoint file has
 disappeared (e.g. after a crash).
 
 ## Documentation

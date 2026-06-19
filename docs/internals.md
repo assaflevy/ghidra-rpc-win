@@ -27,10 +27,11 @@ cron/systemd/nohup contexts that strip non-standard env vars.
 1. Saves the session file.
 2. Spawns `python -m ghidra_rpc.daemon --mode … --project …` with `start_new_session=True`
    so the child survives the parent's exit.
-3. Polls the socket (0.5 s interval) until it's responsive or the timeout expires.
+3. Polls the endpoint (0.5 s interval) until it's responsive or the timeout expires.
 4. On timeout the error message includes the log file path.
 
-Log file: `/tmp/ghidra-rpc-<hash>.log` (same stem as the socket). On timeout:
+Log file: same directory and stem as the endpoint (`/tmp/ghidra-rpc-<hash>.log`
+on Linux/macOS, `%TEMP%\ghidra-rpc-<hash>.log` on Windows). On timeout:
 ```
 tail -50 /tmp/ghidra-rpc-*.log
 ```
@@ -91,7 +92,7 @@ reliable path. Document this clearly to users.
 Ghidra GUI startup (JVM boot + window + project load) regularly takes 60–120 s on cold
 hardware. `restart` defaults to **180 s** in GUI mode to accommodate this. The CLI
 returns `ok: true` with a `"warning"` field (not an error) when the daemon starts but
-doesn't become ping-responsive within the timeout, because the socket file exists and
+doesn't become ping-responsive within the timeout, because the endpoint file exists and
 the server is almost certainly alive.
 
 ### 9. macOS framework Python

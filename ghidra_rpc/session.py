@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Iterator, TextIO
+
+from ghidra_rpc.transport import endpoint_path_for_project
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 @dataclass
@@ -28,13 +36,13 @@ class Session:
 
 
 def socket_path_for_project(gpr: Path) -> Path:
-    """Derive a deterministic socket path from a .gpr project path.
+    """Derive a deterministic RPC endpoint path from a .gpr project path.
 
-    Uses an 8-character hash of the absolute path so each project gets
-    its own socket without collisions.
+    Uses an 8-character hash of the absolute path so each project gets its own
+    endpoint without collisions.  Unix uses a real ``.sock`` file; Windows uses
+    a small ``.port`` file that points clients at the localhost TCP listener.
     """
-    digest = hashlib.sha256(str(gpr.resolve()).encode()).hexdigest()[:8]
-    return Path(f"/tmp/ghidra-rpc-{digest}.sock")
+    return endpoint_path_for_project(gpr)
 
 
 def session_file_path(gpr: Path) -> Path:
@@ -101,9 +109,33 @@ def remove(gpr: Path) -> None:
 #   3. $XDG_STATE_HOME/ghidra-rpc/sessions.json                (Linux, if set)
 #   4. ~/.local/state/ghidra-rpc/sessions.json                 (Linux default)
 #
-# All reads/writes are protected by an exclusive flock so concurrent daemon
-# starts don't corrupt the file.  Registry failures are non-fatal — callers
-# degrade gracefully to /tmp globbing.
+# All reads/writes are protected by an exclusive OS-level file lock so
+# concurrent daemon starts don't corrupt the file.  Registry failures are
+# non-fatal — callers degrade gracefully to endpoint-file discovery.
+
+
+@contextmanager
+def _exclusive_lock(fh: TextIO) -> Iterator[None]:
+    """Hold an exclusive lock on the registry file.
+
+    ``fcntl.flock`` is not available on Windows, so use ``msvcrt.locking``
+    there.  The lock covers one byte at the start of the file; advisory locking
+    only needs a shared convention, and this keeps empty files lockable too.
+    """
+    if os.name == "nt":
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _registry_path() -> Path:
@@ -113,6 +145,11 @@ def _registry_path() -> Path:
         return Path(state_dir) / "sessions.json"
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "ghidra-rpc"
+    elif os.name == "nt":
+        # LOCALAPPDATA is the conventional per-user state location on Windows.
+        # Fall back to the home directory so service-like shells still work.
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        base = Path(local_appdata) / "ghidra-rpc" if local_appdata else Path.home() / "AppData" / "Local" / "ghidra-rpc"
     else:
         xdg = os.environ.get("XDG_STATE_HOME")
         base = Path(xdg) / "ghidra-rpc" if xdg else Path.home() / ".local" / "state" / "ghidra-rpc"
@@ -132,19 +169,19 @@ def register(session: Session) -> None:
     }
     try:
         with open(path, "a+") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
-            fh.seek(0)
-            content = fh.read()
-            try:
-                registry = json.loads(content) if content.strip() else {}
-            except json.JSONDecodeError:
-                registry = {}
-            registry[digest] = entry
-            fh.seek(0)
-            fh.truncate()
-            fh.write(json.dumps(registry, indent=2))
+            with _exclusive_lock(fh):
+                fh.seek(0)
+                content = fh.read()
+                try:
+                    registry = json.loads(content) if content.strip() else {}
+                except json.JSONDecodeError:
+                    registry = {}
+                registry[digest] = entry
+                fh.seek(0)
+                fh.truncate()
+                fh.write(json.dumps(registry, indent=2))
     except OSError:
-        pass  # Non-fatal: list-instances degrades to /tmp glob
+        pass  # Non-fatal: list-instances degrades to endpoint-file discovery
 
 
 def unregister(gpr: Path) -> None:
@@ -155,18 +192,19 @@ def unregister(gpr: Path) -> None:
     digest = hashlib.sha256(str(gpr.resolve()).encode()).hexdigest()[:8]
     try:
         with open(path, "r+") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
-            content = fh.read()
-            try:
-                registry = json.loads(content) if content.strip() else {}
-            except json.JSONDecodeError:
-                return
-            if digest not in registry:
-                return
-            del registry[digest]
-            fh.seek(0)
-            fh.truncate()
-            fh.write(json.dumps(registry, indent=2))
+            with _exclusive_lock(fh):
+                fh.seek(0)
+                content = fh.read()
+                try:
+                    registry = json.loads(content) if content.strip() else {}
+                except json.JSONDecodeError:
+                    return
+                if digest not in registry:
+                    return
+                del registry[digest]
+                fh.seek(0)
+                fh.truncate()
+                fh.write(json.dumps(registry, indent=2))
     except OSError:
         pass
 

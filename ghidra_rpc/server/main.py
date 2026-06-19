@@ -1,4 +1,4 @@
-"""Unix domain socket server for ghidra-rpc.
+"""Socket server for ghidra-rpc.
 
 Accepts newline-delimited JSON requests and dispatches to tool handlers.
 """
@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ghidra_rpc.session import Session
+from ghidra_rpc.transport import create_server
 
 logger = logging.getLogger("ghidra-rpc.server")
 
@@ -116,7 +117,7 @@ def _handle_connection(conn: socket.socket, ctx: Any, shutdown_event: threading.
 
 
 def run_server(session: Session, ctx: Any) -> None:
-    """Run the RPC server on a Unix domain socket.
+    """Run the RPC server on the platform-appropriate endpoint.
 
     Blocks until a 'stop' command is received or the process is interrupted.
     """
@@ -133,13 +134,7 @@ def run_server(session: Session, ctx: Any) -> None:
 
     sock_path = session.socket_path
 
-    # Clean up stale socket
-    if sock_path.exists():
-        sock_path.unlink()
-
-    server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server_sock.bind(str(sock_path))
-    server_sock.listen(5)
+    server_sock, cleanup_server = create_server(sock_path)
     server_sock.settimeout(1.0)  # Allow periodic checking of shutdown event
 
     shutdown_event = threading.Event()
@@ -163,7 +158,5 @@ def run_server(session: Session, ctx: Any) -> None:
             )
             t.start()
     finally:
-        server_sock.close()
-        if sock_path.exists():
-            sock_path.unlink()
+        cleanup_server()
         logger.info("Server shut down.")

@@ -21,13 +21,13 @@ ghidra-rpc start --project /tmp/project.gpr --headless
 ```
 For very large binaries (>100MB), 8GB or more may be needed.
 
-## Stale Socket File
+## Stale Endpoint File
 
 **Symptom**: "Address already in use" or daemon won't start, but `status` shows not running.
 
-**Fix**: Remove the stale socket file:
+**Fix**: Remove the stale endpoint file:
 ```bash
-# Find the socket path
+# Find the endpoint path
 ghidra-rpc status --project /path/to/project.gpr
 # Remove it
 rm /tmp/ghidra-rpc-XXXXXXXX.sock
@@ -35,8 +35,13 @@ rm /tmp/ghidra-rpc-XXXXXXXX.sock
 ghidra-rpc start --project /path/to/project.gpr --headless
 ```
 
-The daemon normally cleans up its socket on shutdown, but if it's killed (SIGKILL, power
-loss), the socket file may remain.
+On Windows, the endpoint is a `.port` file under `%TEMP%`:
+```powershell
+Remove-Item "$env:TEMP\ghidra-rpc-XXXXXXXX.port"
+```
+
+The daemon normally cleans up its endpoint on shutdown, but if it's killed (SIGKILL,
+Task Manager, power loss), the endpoint file may remain.
 
 ## macOS Framework Python Issue
 
@@ -79,7 +84,7 @@ The daemon **is** running — simply retry your first command in a few seconds.
 ghidra-rpc restart --project /tmp/re.gpr --timeout 300
 ```
 
-**If the response is `ok: false` with `RestartTimeout`** (socket file does not exist),
+**If the response is `ok: false` with `RestartTimeout`** (endpoint file does not exist),
 the background process failed to start. Check the log file whose path is printed in the
 error message.
 

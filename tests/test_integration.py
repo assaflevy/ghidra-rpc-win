@@ -81,7 +81,7 @@ def daemon(tmp_path_factory):
     Teardown stops the daemon after all tests complete.
 
     Yields a dict:
-        sock        -- Path to the daemon's Unix socket
+        sock        -- Path to the daemon endpoint
         binary      -- the binary key returned by ``load`` (full path key)
         short_name  -- ``"testapp"`` (short alias accepted by ``get_program``)
         gpr         -- Path to the temp Ghidra project
@@ -194,11 +194,10 @@ class TestConnectivity:
         from ghidra_rpc.client import DaemonError, send_request
         resp = send_request.__wrapped__ if hasattr(send_request, "__wrapped__") else None
         # Call raw without going through our helper to check the error response
-        import json, socket as _socket, uuid
+        import json, uuid
+        from ghidra_rpc import transport
         request = {"id": str(uuid.uuid4()), "cmd": "_nonexistent_cmd_", "args": {}}
-        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        s.settimeout(10)
-        s.connect(str(daemon["sock"]))
+        s = transport.connect(daemon["sock"], timeout=10)
         s.sendall((json.dumps(request) + "\n").encode())
         buf = b""
         while b"\n" not in buf:

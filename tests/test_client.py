@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from ghidra_rpc import transport
 from ghidra_rpc.client import DaemonError, DaemonNotRunning, send_request
 from ghidra_rpc.client import (
     _DEFAULT_SOCKET_TIMEOUT,
@@ -24,12 +25,10 @@ class TestClient:
 
     @pytest.fixture(autouse=True)
     def setup_echo_server(self, tmp_path):
-        self.sock_path = tmp_path / "echo.sock"
+        self.sock_path = tmp_path / ("echo.port" if transport.IS_WINDOWS else "echo.sock")
 
         def echo_server():
-            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            srv.bind(str(self.sock_path))
-            srv.listen(5)
+            srv, cleanup = transport.create_server(self.sock_path)
             srv.settimeout(5)
             try:
                 while True:
@@ -51,7 +50,7 @@ class TestClient:
             except Exception:
                 pass
             finally:
-                srv.close()
+                cleanup()
 
         self.server_thread = threading.Thread(target=echo_server, daemon=True)
         self.server_thread.start()
@@ -131,8 +130,8 @@ class TestSession:
         a = socket_path_for_project(p)
         b = socket_path_for_project(p)
         assert a == b
-        assert str(a).startswith("/tmp/ghidra-rpc-")
-        assert str(a).endswith(".sock")
+        assert a.name.startswith("ghidra-rpc-")
+        assert a.suffix == (".port" if transport.IS_WINDOWS else ".sock")
 
     def test_save_and_load(self, tmp_path):
         from ghidra_rpc.session import Session, save, load
